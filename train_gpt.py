@@ -841,7 +841,7 @@ class GPT(nn.Module):
             for i in range(num_layers)
         ])
         # tied layer setup
-        self.tied_layer_source = 7
+        self.tied_layer_source = int(os.environ.get("TIED_LAYER_SOURCE", "7"))
         assert self.tied_layer_source < num_layers - 1
         self.tie_gate = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
         self.blocks = nn.ModuleList(
@@ -1038,6 +1038,7 @@ class GPT(nn.Module):
                     self._mlp_up_list[self.tied_layer_source],
                     self._mlp_down_list[self.tied_layer_source],
                     v_embed=ve,
+                    v0=v0,
                 )
                 alpha = self.tie_gate.to(dtype=x.dtype)
                 x = (1 - alpha) * x + alpha * x_tied
