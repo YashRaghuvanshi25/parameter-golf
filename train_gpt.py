@@ -52,7 +52,7 @@ class Hyperparameters:
     ).split(",")]
     bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 3072))
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 112))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 4000))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 5000))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
@@ -96,6 +96,10 @@ class Hyperparameters:
     # GPTQ calibration
     gptq_calib_batches = int(os.environ.get("GPTQ_CALIB_BATCHES", 256))
     gptq_block_size = int(os.environ.get("GPTQ_BLOCK_SIZE", 128))
+    # Causal SLOT: per-batch delta optimization at last hidden layer (post-quantization)
+    slot_enabled = bool(int(os.environ.get("SLOT_ENABLED", "1")))
+    slot_lr = float(os.environ.get("SLOT_LR", 0.005))
+    slot_steps = int(os.environ.get("SLOT_STEPS", 8))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -924,66 +928,10 @@ class GPT(nn.Module):
         ve_idx = self.ve_layer_indices.index(layer_idx)
         return ve_base * self.ve_layer_scales[ve_idx].to(dtype=ve_base.dtype)
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
-        n = self.num_layers
-        x = self.tok_emb(input_ids)
-        if self.bigram is not None:
-            x = x + self.bigram(input_ids)
-        x = F.rms_norm(x, (x.size(-1),))
-        x = self.smear(x)
-        x0 = x
-        v0 = None
-        skips: list[Tensor] = []
-        ve_cache: dict = {}
-        for i in range(self.num_encoder_layers):
-            ve = self._get_ve(i, input_ids, ve_cache)
-            x, raw_v = self.blocks[i](x, x0,
-                self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self._mlp_up_list[i], self._mlp_down_list[i],
-                v_embed=ve, v0=v0)
-            if v0 is None and raw_v is not None:
-                v0 = raw_v
-            skips.append(x)
-        for i in range(self.num_decoder_layers):
-            bi = self.num_encoder_layers + i
-            if skips:
-                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
-            ve = self._get_ve(bi, input_ids, ve_cache)
-            if bi == self.num_layers - 1:
-                x_tied, raw_v_tied = self.blocks[self.tied_layer_source](
-                    x, x0,
-                    self.qo_bank[self.tied_layer_source],
-                    self.kv_bank[self.tied_layer_source],
-                    self.kv_bank[n + self.tied_layer_source],
-                    self.qo_bank[n + self.tied_layer_source],
-                    self._mlp_up_list[self.tied_layer_source],
-                    self._mlp_down_list[self.tied_layer_source],
-                    v_embed=ve, v0=v0,
-                )
-                if v0 is None and raw_v_tied is not None:
-                    v0 = raw_v_tied
-                alpha = self.tie_gate.to(dtype=x.dtype)
-                x = (1 - alpha) * x + alpha * x_tied
-            else:
-                x, raw_v = self.blocks[bi](
-                    x, x0,
-                    self.qo_bank[bi],
-                    self.kv_bank[bi],
-                    self.kv_bank[n + bi],
-                    self.qo_bank[n + bi],
-                    self._mlp_up_list[bi],
-                    self._mlp_down_list[bi],
-                    v_embed=ve, v0=v0,
-                )
-        x = self.final_norm(x)
+        x = self.forward_hidden(input_ids)
         x_flat = x.reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
-        if self.tie_embeddings:
-            logits_proj = F.linear(x_flat, self.tok_emb.weight)
-        else:
-            if self.lm_head is None:
-                raise RuntimeError("lm_head is required when tie_embeddings=False")
-            logits_proj = self.lm_head(x_flat)
-        logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+        logits = self.compute_logits(x_flat)
         main_loss = F.cross_entropy(logits.float(), targets, reduction="mean")
         if self.training and self.mtp_num_heads > 0 and self.mtp_loss_weight > 0.0:
             _, seqlen, dim = x.shape
@@ -1002,8 +950,8 @@ class GPT(nn.Module):
             if mtp_loss_count > 0:
                 main_loss = main_loss + self.mtp_loss_weight * (mtp_loss_sum / mtp_loss_count)
         return main_loss
-    def forward_logits(self, input_ids: Tensor) -> Tensor:
-        """Return logits (bsz, seq_len, vocab) without computing loss."""
+    def forward_hidden(self, input_ids: Tensor) -> Tensor:
+        """Return final hidden states before output projection."""
         n = self.num_layers
         x = self.tok_emb(input_ids)
         if self.bigram is not None:
@@ -1053,12 +1001,20 @@ class GPT(nn.Module):
                     self._mlp_down_list[bi],
                     v_embed=ve,
                 )
-        x = self.final_norm(x)
+        return self.final_norm(x)
+
+    def compute_logits(self, hidden_states: Tensor) -> Tensor:
         if self.tie_embeddings:
-            logits_proj = F.linear(x, self.tok_emb.weight)
+            logits_proj = F.linear(hidden_states, self.tok_emb.weight)
         else:
-            logits_proj = self.lm_head(x)
+            if self.lm_head is None:
+                raise RuntimeError("lm_head is required when tie_embeddings=False")
+            logits_proj = self.lm_head(hidden_states)
         return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+
+    def forward_logits(self, input_ids: Tensor) -> Tensor:
+        """Return logits (bsz, seq_len, vocab) without computing loss."""
+        return self.compute_logits(self.forward_hidden(input_ids))
 
 # --- Sliding window evaluation ---
 
@@ -1901,7 +1857,7 @@ def main() -> None:
     from collections import deque
     lawa_queue: deque[dict[str, Tensor]] = deque(maxlen=args.lawa_k)
     ema_state = {name: t.detach().float().clone() for name, t in base_model.state_dict().items()}
-    ema_decay = 0.997
+    ema_decay = float(os.environ.get("EMA_DECAY", 0.998))
     training_time_ms = 0.0
     stop_after_step: int | None = None
     torch.cuda.synchronize()
@@ -2243,6 +2199,103 @@ def main() -> None:
         )
         log0(f"final_int6_sliding_window_s64_exact val_loss:{sw64_val_loss:.8f} val_bpb:{sw64_val_bpb:.8f}")
         log0(f"final_int8_zlib_roundtrip_exact val_loss:{sw64_val_loss:.8f} val_bpb:{sw64_val_bpb:.8f}")
+    if args.slot_enabled and args.eval_stride > 0 and args.eval_stride < sw_seq_len:
+        try:
+            slot_stride = args.eval_stride
+            seq_s = sw_seq_len
+            total_tok = val_tokens.numel() - 1
+            ws_list = [ws for ws in range(0, total_tok, slot_stride) if min(ws + seq_s, total_tok) - ws >= 1]
+            my_s = (len(ws_list) * rank) // world_size
+            my_e = (len(ws_list) * (rank + 1)) // world_size
+            my_ws = ws_list[my_s:my_e]
+            num_batches = (len(my_ws) + 31) // 32
+            sl_loss = torch.zeros((), device=device, dtype=torch.float64)
+            sl_tc = torch.zeros((), device=device, dtype=torch.float64)
+            sl_bc = torch.zeros((), device=device, dtype=torch.float64)
+            torch.cuda.synchronize()
+            t_slot = time.perf_counter()
+            eval_model.eval()
+            log0(
+                f"causal_slot:start lr={args.slot_lr} steps={args.slot_steps} stride={slot_stride} "
+                f"windows={len(my_ws)} batches={num_batches}"
+            )
+            for batch_idx, bi in enumerate(range(0, len(my_ws), 32)):
+                bws = my_ws[bi:bi + 32]
+                bsz = len(bws)
+                xb = torch.zeros(bsz, seq_s, dtype=torch.int64, device=device)
+                yb = torch.zeros(bsz, seq_s, dtype=torch.int64, device=device)
+                wls: list[int] = []
+                for i, ws in enumerate(bws):
+                    end = min(ws + seq_s, total_tok)
+                    wl = end - ws
+                    wls.append(wl)
+                    ct = val_tokens[ws:end + 1].to(dtype=torch.int64, device=device)
+                    xb[i, :wl] = ct[:-1]
+                    yb[i, :wl] = ct[1:]
+                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    H = eval_model.forward_hidden(xb)
+                H = H.detach().float()
+                context_mask = torch.zeros(bsz, seq_s, dtype=torch.bool, device=device)
+                has_context = False
+                for i, ws in enumerate(bws):
+                    wl = wls[i]
+                    s = 0 if ws == 0 else max(wl - slot_stride, 0)
+                    if s > 0:
+                        context_mask[i, :s] = True
+                        has_context = True
+                delta = torch.zeros(1, 1, H.shape[-1], device=device, dtype=H.dtype, requires_grad=True)
+                if has_context:
+                    sopt = torch.optim.AdamW([delta], lr=args.slot_lr, betas=(0.3, 0.9), weight_decay=1e-8, eps=1e-5)
+                    for _ in range(args.slot_steps):
+                        sopt.zero_grad()
+                        lg = eval_model.compute_logits((H + delta).to(torch.bfloat16)).float()
+                        nll_all = F.cross_entropy(
+                            lg.reshape(-1, lg.size(-1)),
+                            yb.reshape(-1),
+                            reduction="none",
+                        ).reshape(bsz, seq_s)
+                        ctx_nll = nll_all[context_mask]
+                        if ctx_nll.numel() > 0:
+                            loss_c = ctx_nll.mean()
+                            loss_c.backward()
+                            sopt.step()
+                with torch.no_grad():
+                    lg = eval_model.compute_logits((H + delta.detach()).to(torch.bfloat16)).float()
+                nll = F.cross_entropy(
+                    lg.reshape(-1, lg.size(-1)),
+                    yb.reshape(-1),
+                    reduction="none",
+                ).reshape(bsz, seq_s)
+                for i, ws in enumerate(bws):
+                    wl = wls[i]
+                    s = 0 if ws == 0 else max(wl - slot_stride, 0)
+                    sl_loss += nll[i, s:wl].to(torch.float64).sum()
+                    sl_tc += float(wl - s)
+                    tgt, prev = yb[i, s:wl], xb[i, s:wl]
+                    tb = base_bytes_lut[tgt].to(torch.float64)
+                    tb += (has_leading_space_lut[tgt] & ~is_boundary_token_lut[prev]).to(torch.float64)
+                    sl_bc += tb.sum()
+                if batch_idx % 500 == 0 or batch_idx == num_batches - 1:
+                    log0(
+                        f"  causal_slot:batch {batch_idx + 1}/{num_batches} "
+                        f"time:{time.perf_counter() - t_slot:.1f}s"
+                    )
+                    sys.stdout.flush()
+            if dist.is_available() and dist.is_initialized():
+                dist.all_reduce(sl_loss, op=dist.ReduceOp.SUM)
+                dist.all_reduce(sl_tc, op=dist.ReduceOp.SUM)
+                dist.all_reduce(sl_bc, op=dist.ReduceOp.SUM)
+            sv_loss = (sl_loss / sl_tc).item()
+            sv_bpb = sv_loss / math.log(2.0) * (sl_tc.item() / sl_bc.item())
+            torch.cuda.synchronize()
+            log0(f"final_causal_slot val_loss:{sv_loss:.4f} val_bpb:{sv_bpb:.4f} time:{1000 * (time.perf_counter() - t_slot):.0f}ms")
+            log0(f"final_causal_slot_exact val_loss:{sv_loss:.8f} val_bpb:{sv_bpb:.8f}")
+            log0(f"final_int8_zlib_roundtrip_exact val_loss:{sv_loss:.8f} val_bpb:{sv_bpb:.8f}")
+        except Exception as e:
+            import traceback
+            log0(f"causal_slot:ERROR {e}")
+            traceback.print_exc()
+            sys.stdout.flush()
     if distributed:
         dist.destroy_process_group()
 if __name__ == "__main__":
