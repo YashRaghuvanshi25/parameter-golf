@@ -1707,7 +1707,7 @@ def main() -> None:
     log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
-    CastedLinear._qat_enabled = args.qat_enabled
+    CastedLinear._qat_enabled = args.qat_enabled and args.late_qat_threshold <= 0
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1931,9 +1931,17 @@ def main() -> None:
             break
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
-        if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
-            CastedLinear._qat_enabled = True
-            log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
+        qat_should_enable = args.qat_enabled
+        progress = step / max(args.iterations, 1)
+        if args.qat_enabled and args.late_qat_threshold > 0:
+            qat_should_enable = progress >= (1.0 - args.late_qat_threshold)
+        if qat_should_enable != CastedLinear._qat_enabled:
+            CastedLinear._qat_enabled = qat_should_enable
+            if qat_should_enable:
+                log0(
+                    f"late_qat:enabled step:{step} progress:{progress:.4f} "
+                    f"threshold_start:{1.0 - args.late_qat_threshold:.4f}"
+                )
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
