@@ -98,8 +98,8 @@ class Hyperparameters:
     gptq_block_size = int(os.environ.get("GPTQ_BLOCK_SIZE", 128))
     # Causal SLOT: per-batch delta optimization at last hidden layer (post-quantization)
     slot_enabled = bool(int(os.environ.get("SLOT_ENABLED", "1")))
-    slot_lr = float(os.environ.get("SLOT_LR", 0.005))
-    slot_steps = int(os.environ.get("SLOT_STEPS", 8))
+    slot_lr = float(os.environ.get("SLOT_LR", 0.0045))
+    slot_steps = int(os.environ.get("SLOT_STEPS", 10))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
