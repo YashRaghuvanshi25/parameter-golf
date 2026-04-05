@@ -52,7 +52,7 @@ class Hyperparameters:
     ).split(",")]
     bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 3072))
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 112))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 6000))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1500))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
