@@ -52,16 +52,16 @@ class Hyperparameters:
     ).split(",")]
     bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 3072))
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 112))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 5000))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 6000))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
-    tied_embed_lr = float(os.environ.get("TIED_EMBED_LR", 0.035))
+    tied_embed_lr = float(os.environ.get("TIED_EMBED_LR", 0.032))
     tied_embed_init_std = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
-    matrix_lr = float(os.environ.get("MATRIX_LR", 0.025))
-    scalar_lr = float(os.environ.get("SCALAR_LR", 0.025))
+    matrix_lr = float(os.environ.get("MATRIX_LR", 0.022))
+    scalar_lr = float(os.environ.get("SCALAR_LR", 0.022))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.99))
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
     muon_momentum_warmup_start = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.92))
@@ -69,7 +69,7 @@ class Hyperparameters:
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
-    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
+    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.25))
     eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
     mtp_num_heads = int(os.environ.get("MTP_NUM_HEADS", 0))
     mtp_loss_weight = float(os.environ.get("MTP_LOSS_WEIGHT", 0.2))
@@ -99,7 +99,7 @@ class Hyperparameters:
     # Causal SLOT: per-batch delta optimization at last hidden layer (post-quantization)
     slot_enabled = bool(int(os.environ.get("SLOT_ENABLED", "1")))
     slot_lr = float(os.environ.get("SLOT_LR", 0.0045))
-    slot_steps = int(os.environ.get("SLOT_STEPS", 10))
+    slot_steps = int(os.environ.get("SLOT_STEPS", 8))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
