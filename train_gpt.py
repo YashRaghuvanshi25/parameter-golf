@@ -847,7 +847,7 @@ class GPT(nn.Module):
         # tied layer setup
         self.tied_layer_source = int(os.environ.get("TIED_LAYER_SOURCE", "7"))
         assert self.tied_layer_source < num_layers - 1
-        self.tie_gate = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
+        self.tie_gate = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -2005,6 +2005,7 @@ def main() -> None:
         f"DIAGNOSTIC post_ema val_loss:{diag_val_loss:.4f} val_bpb:{diag_val_bpb:.4f} "
         f"eval_time:{1000.0 * (time.perf_counter() - t_diag):.0f}ms"
     )
+    log0(f"tie_gate final value: {base_model.tie_gate.item():.4f}")
     full_state_dict = base_model.state_dict()
     export_sd = {k: v for k, v in full_state_dict.items() if "mtp_heads" not in k}
     excluded_mtp = sum(int(t.numel()) for k, t in full_state_dict.items() if "mtp_heads" in k)

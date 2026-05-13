@@ -48,14 +48,14 @@ class Hyperparameters:
     seed: int = int(os.environ.get("SEED", 1337))
 
     # Training loop. These defaults now mirror train_gpt.py on a single process.
-    iterations: int = int(os.environ.get("ITERATIONS", 20_000))
+    iterations: int = int(os.environ.get("ITERATIONS", 200))
     val_loss_every: int = int(os.environ.get("VAL_LOSS_EVERY", 0))
     # Validation always uses the full fineweb_val split.
     val_batch_size: int = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     train_log_every: int = int(os.environ.get("TRAIN_LOG_EVERY", 200))
-    train_batch_tokens: int = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
+    train_batch_tokens: int = int(os.environ.get("TRAIN_BATCH_TOKENS", 8192))
     grad_accum_steps: int = int(os.environ.get("GRAD_ACCUM_STEPS", 8))
-    train_seq_len: int = int(os.environ.get("TRAIN_SEQ_LEN", os.environ.get("TRAIN_MAX_SEQ_LEN", 1024)))
+    train_seq_len: int = int(os.environ.get("TRAIN_SEQ_LEN", 256))
     # Chunk each logical MLX microbatch into smaller sub-batches to reduce peak
     # memory pressure without changing the effective optimizer batch.
     mlx_max_microbatch_tokens: int = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
@@ -64,16 +64,16 @@ class Hyperparameters:
     # Disable on 32GB+ unified memory for better throughput (MLX_EAGER_EVAL=0).
     mlx_eager_eval: bool = bool(int(os.environ.get("MLX_EAGER_EVAL", "1")))
     warmup_steps: int = int(os.environ.get("WARMUP_STEPS", 20))
-    warmdown_iters: int = int(os.environ.get("WARMDOWN_ITERS", 1200))
+    warmdown_iters: int = int(os.environ.get("WARMDOWN_ITERS", 50))
     max_wallclock_seconds: float = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
 
     # Model (defaults match the current baseline setup).
     vocab_size: int = int(os.environ.get("VOCAB_SIZE", 1024))
-    num_layers: int = int(os.environ.get("NUM_LAYERS", 9))
-    model_dim: int = int(os.environ.get("MODEL_DIM", 512))
-    num_heads: int = int(os.environ.get("NUM_HEADS", 8))
-    num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 4))
-    mlp_mult: int = int(os.environ.get("MLP_MULT", 2))
+    num_layers: int = int(os.environ.get("NUM_LAYERS", 3))
+    model_dim: int = int(os.environ.get("MODEL_DIM", 128))
+    num_heads: int = int(os.environ.get("NUM_HEADS", 4))
+    num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 2))
+    mlp_mult: int = int(os.environ.get("MLP_MULT", 3))
     tie_embeddings: bool = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
@@ -85,16 +85,24 @@ class Hyperparameters:
     beta1: float = float(os.environ.get("BETA1", 0.9))
     beta2: float = float(os.environ.get("BETA2", 0.95))
     adam_eps: float = float(os.environ.get("ADAM_EPS", 1e-8))
-    tied_embed_lr: float = float(os.environ.get("TIED_EMBED_LR", 0.05))
-    matrix_lr: float = float(os.environ.get("MATRIX_LR", 0.04))
-    scalar_lr: float = float(os.environ.get("SCALAR_LR", 0.04))
-    muon_momentum: float = float(os.environ.get("MUON_MOMENTUM", 0.95))
+    tied_embed_lr: float = float(os.environ.get("TIED_EMBED_LR", 0.035))
+    matrix_lr: float = float(os.environ.get("MATRIX_LR", 0.025))
+    scalar_lr: float = float(os.environ.get("SCALAR_LR", 0.025))
+    muon_momentum: float = float(os.environ.get("MUON_MOMENTUM", 0.99))
     muon_backend_steps: int = int(os.environ.get("MUON_BACKEND_STEPS", 5))
-    muon_momentum_warmup_start: float = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
-    muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
-    grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+    muon_momentum_warmup_start: float = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.92))
+    muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 1500))
+    grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
 
     out_dir: str = os.environ.get("OUT_DIR", "logs")
+
+    # Additional fields
+    muon_wd: float = float(os.environ.get("MUON_WD", 0.04))
+    adam_wd: float = float(os.environ.get("ADAM_WD", 0.04))
+    bigram_hash_buckets: int = int(os.environ.get("BIGRAM_HASH_BUCKETS", 4096))
+    bigram_hash_dim: int = int(os.environ.get("BIGRAM_HASH_DIM", 32))
+    use_smeargate: bool = bool(int(os.environ.get("USE_SMEARGATE", "1")))
+    eval_stride: int = int(os.environ.get("EVAL_STRIDE", 64))
 
     @property
     def train_files(self) -> str:
@@ -277,13 +285,50 @@ class TokenLoader:
 # MODEL BLOCKS
 # ==============================================================================
 
+
 class CastedLinear(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int):
+    def __init__(self, in_dim: int, out_dim: int, qat: bool = False):
         super().__init__()
         self.weight = nn.Linear(in_dim, out_dim, bias=False).weight.astype(mx.float32)
+        self.qat = qat
+
+    def fake_quantize_int6(self, w: mx.array) -> mx.array:
+        scale = mx.max(mx.abs(w), axis=1, keepdims=True) / 31.0 + 1e-8
+        q = mx.clip(mx.round(w / scale), -31, 31)
+        return q * scale
 
     def __call__(self, x: mx.array) -> mx.array:
-        return x @ self.weight.astype(x.dtype).T
+        w = self.weight.astype(x.dtype)
+        if self.qat:
+            w = self.fake_quantize_int6(w)
+        return x @ w.T
+
+
+# --- BigramHash and SmearGate ---
+class BigramHash(nn.Module):
+    def __init__(self, num_buckets: int, hash_dim: int, model_dim: int):
+        super().__init__()
+        self.num_buckets = num_buckets
+        self.hash_dim = hash_dim
+        self.table = nn.Embedding(num_buckets, hash_dim)
+        self.proj = CastedLinear(hash_dim, model_dim)
+
+    def __call__(self, input_ids: mx.array) -> mx.array:
+        prev = mx.concatenate([input_ids[:, :1], input_ids[:, :-1]], axis=1)
+        buckets = (prev * 92821 + input_ids) % self.num_buckets
+        h = self.table(buckets)
+        return self.proj(h.astype(COMPUTE_DTYPE))
+
+
+class SmearGate(nn.Module):
+    def __init__(self, model_dim: int):
+        super().__init__()
+        self.gate = mx.ones((model_dim,), dtype=mx.float32) * 3.0
+
+    def __call__(self, x: mx.array, input_ids: mx.array) -> mx.array:
+        prev_x = mx.concatenate([x[:, :1, :], x[:, :-1, :]], axis=1)
+        gate = mx.sigmoid(self.gate).astype(x.dtype)
+        return gate * x + (1 - gate) * prev_x
 
 
 class RMSNormNoWeight(nn.Module):
@@ -316,10 +361,10 @@ class CausalSelfAttention(nn.Module):
         if self.head_dim % 2 != 0:
             raise ValueError("head_dim must be even for RoPE")
         kv_dim = self.num_kv_heads * self.head_dim
-        self.c_q = CastedLinear(dim, dim)
-        self.c_k = CastedLinear(dim, kv_dim)
-        self.c_v = CastedLinear(dim, kv_dim)
-        self.proj = CastedLinear(dim, dim)
+        self.c_q = CastedLinear(dim, dim, qat=True)
+        self.c_k = CastedLinear(dim, kv_dim, qat=True)
+        self.c_v = CastedLinear(dim, kv_dim, qat=True)
+        self.proj = CastedLinear(dim, dim, qat=True)
         self.q_gain = mx.ones((num_heads,), dtype=mx.float32) * qk_gain_init
         self.rope = nn.RoPE(self.head_dim, traditional=False, base=rope_base)
         self.scale = self.head_dim ** -0.5
@@ -343,8 +388,8 @@ class MLP(nn.Module):
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         hidden = dim * mlp_mult
-        self.fc = CastedLinear(dim, hidden)
-        self.proj = CastedLinear(hidden, dim)
+        self.fc = CastedLinear(dim, hidden, qat=True)
+        self.proj = CastedLinear(hidden, dim, qat=True)
 
     def __call__(self, x: mx.array) -> mx.array:
         x = nn.relu(self.fc(x))
@@ -384,22 +429,36 @@ class GPT(nn.Module):
     # - encoder half accumulates skip tensors
     # - decoder half consumes reversed skips with learned skip_weights
     # - tied embeddings for the LM head (the baseline default setup)
-    def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
-                 logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
-                 qk_gain_init: float):
+    def __init__(
+        self,
+        vocab_size: int,
+        num_layers: int,
+        model_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mlp_mult: int,
+        logit_chunk_tokens: int,
+        logit_softcap: float,
+        rope_base: float,
+        tied_embed_init_std: float,
+        qk_gain_init: float,
+        bigram_hash_buckets: int,
+        bigram_hash_dim: int,
+        use_smeargate: bool,
+    ):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         self.logit_chunk_tokens = logit_chunk_tokens
         self.logit_softcap = logit_softcap
 
-        self.tok_emb = nn.Embedding(vocab_size, dim)
+        self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
-        self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+        self.skip_weights = mx.ones((self.num_skip_weights, model_dim), dtype=mx.float32)
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+            Block(model_dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
             for i in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
@@ -411,12 +470,39 @@ class GPT(nn.Module):
             mx.random.normal(self.tok_emb.weight.shape, dtype=mx.float32) * tied_embed_init_std
         ).astype(COMPUTE_DTYPE)
 
+        self.bigram = BigramHash(bigram_hash_buckets, bigram_hash_dim, model_dim)
+        self.use_smeargate = use_smeargate
+        if use_smeargate:
+            self.smeargate = SmearGate(model_dim)
+
+        self._ortho_init()
+
+    def _ortho_init(self):
+        for block in self.blocks:
+            for module in [
+                block.attn.c_q, block.attn.c_k,
+                block.attn.c_v, block.attn.proj,
+                block.mlp.fc, block.mlp.proj
+            ]:
+                w = module.weight
+                rows, cols = w.shape
+
+                # Generate random matrix with same shape
+                rand = mx.random.normal((rows, cols))
+
+                # Normalize rows to unit norm (safe for rectangular matrices)
+                norm = mx.sqrt(mx.sum(rand * rand, axis=1, keepdims=True)) + 1e-8
+                module.weight = (rand / norm).astype(mx.float32)
+
     def softcap(self, logits: mx.array) -> mx.array:
         c = self.logit_softcap
         return c * mx.tanh(logits / c)
 
     def __call__(self, input_ids: mx.array) -> mx.array:
         x = rms_norm(self.tok_emb(input_ids).astype(COMPUTE_DTYPE))
+        x = x + self.bigram(input_ids)
+        if self.use_smeargate:
+            x = self.smeargate(x, input_ids)
         x0 = x
         skips: list[mx.array] = []
 
@@ -478,7 +564,8 @@ class Muon:
             g_eff = g + momentum * buf
             g_ortho = zeropower_newtonschulz5(g_eff, self.args.muon_backend_steps)
             scale = math.sqrt(max(1.0, float(p.shape[0]) / float(p.shape[1])))
-            out[k] = p - lr * (g_ortho * scale).astype(p.dtype)
+            p_decayed = p * (1.0 - self.args.muon_wd * lr)
+            out[k] = p_decayed - lr * (g_ortho * scale).astype(p.dtype)
         return out
 
 
@@ -602,6 +689,13 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
         0,
     )
     for name, arr in flat_state.items():
+        if name == "tok_emb.weight":
+            passthrough[name] = np.ascontiguousarray(
+                np.array(arr.astype(mx.float16), dtype=np.float16, copy=False)
+            )
+            passthrough_orig_dtypes[name] = "float16"
+            stats["int8_payload_bytes"] += arr.size * 2
+            continue
         stats["param_count"] += int(arr.size)
         stats["num_tensors"] += 1
         stats["baseline_tensor_bytes"] += int(arr.nbytes)
@@ -888,7 +982,7 @@ def main() -> None:
     model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
-        dim=args.model_dim,
+        model_dim=args.model_dim,
         num_heads=args.num_heads,
         num_kv_heads=args.num_kv_heads,
         mlp_mult=args.mlp_mult,
@@ -897,6 +991,9 @@ def main() -> None:
         rope_base=args.rope_base,
         tied_embed_init_std=args.tied_embed_init_std,
         qk_gain_init=args.qk_gain_init,
+        bigram_hash_buckets=args.bigram_hash_buckets,
+        bigram_hash_dim=args.bigram_hash_dim,
+        use_smeargate=args.use_smeargate,
     )
     opt = SplitOptimizers(model, args)
 
