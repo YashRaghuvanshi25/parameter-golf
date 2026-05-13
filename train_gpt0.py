@@ -42,7 +42,7 @@ def _generate_mlp_mults(test_mode: str, num_layers: int) -> list[int]:
     if test_mode == "uniform":
         return [3, 3, 3, 3, 3, 3, 3, 3, 3]  # sum=27
     elif test_mode == "increasing":
-        return [2, 2, 2, 3, 3, 3, 3, 4, 5]  # sum=27
+        return [1, 1, 1, 2, 2, 3, 4, 5, 8]  # sum=27
     elif test_mode == "decreasing":
         return [5, 4, 3, 3, 3, 3, 2, 2, 2]  # sum=27
     else:
